@@ -1,171 +1,167 @@
 package client
 
 import (
-	"context"
-	"fmt"
-	"io/ioutil"
+	"crypto/rsa"
+	"crypto/tls"
 	"strings"
 	"time"
 
-	"github.com/skilld-labs/opcua"
-	"github.com/skilld-labs/opcua/errors"
-	"github.com/skilld-labs/opcua/ua"
+	"github.com/gopcua/opcua"
+	"github.com/gopcua/opcua/ua"
 	"github.com/skilld-labs/telemetry-opcua-exporter/config"
 	"github.com/skilld-labs/telemetry-opcua-exporter/log"
 )
 
-func NewClientFromServerConfig(cfg config.ServerConfig, logger log.Logger) *opcua.Client {
-	opts := []opcua.Option{}
-	authMode := *cfg.Auth
-	switch authMode {
-	case "Certificate":
-		return NewCertificateClient(*cfg.CertFile, *cfg.KeyFile, cfg, logger)
-	case "UserName":
-		return NewBasicAuthClient(*cfg.Username, *cfg.Password, cfg, logger)
-	default:
-		*cfg.Auth = "Anonymous"
-		opts = append(opts, opcua.AuthAnonymous())
-	}
-	return getClientWithOptions(cfg, opts, logger)
+func NewClientFromServerConfig(c config.ServerConfig, l log.Logger) *opcua.Client {
+	e := findEndpoint(c, l)
+	crt := loadCertificate(c, l)
+
+	o := []opcua.Option{}
+	o = append(o, connectionOptions()...)
+	o = append(o, authenticationOptions(c, l, e, &crt)...)
+	o = append(o, securityOptions(c, l, e, &crt)...)
+
+	l.Info("client using config: Endpoint: %s, Security Mode: %s, %s, Authentication Mode : %s", e.EndpointURL, e.SecurityPolicyURI, e.SecurityMode, c.AuthMode)
+
+	return opcua.NewClient(c.Endpoint, o...)
 }
 
-func NewCertificateClient(certfile, keyfile string, cfg config.ServerConfig, logger log.Logger) *opcua.Client {
-	return getClientWithOptions(cfg, certificateOptions(certfile, keyfile, logger), logger)
-}
-
-func NewBasicAuthClient(username, password string, cfg config.ServerConfig, logger log.Logger) *opcua.Client {
-	return getClientWithOptions(cfg, []opcua.Option{opcua.AuthUsername(username, password)}, logger)
-}
-
-func getClientWithOptions(cfg config.ServerConfig, opts []opcua.Option, logger log.Logger) *opcua.Client {
-	clientSecurityOpts, err := clientSecurityOptions(cfg, logger)
+func findEndpoint(c config.ServerConfig, l log.Logger) *ua.EndpointDescription {
+	ee, err := opcua.GetEndpoints(c.Endpoint)
 	if err != nil {
-		logger.Err("%v", err)
+		l.Fatal("get endpoints failed: %v", err)
 	}
-	opts = append(opts, clientSecurityOpts...)
-	opts = append(opts, opcua.Lifetime(10*time.Minute), opcua.RequestTimeout(5*time.Second), opcua.AutoReconnect(true))
 
-	c := opcua.NewClient(*cfg.Endpoint, opts...)
-	if err := c.Connect(context.Background()); err != nil {
-		logger.Err("cannot connect opcua client %v", err)
-	}
-	return c
-}
-
-func certificateOptions(certfile, keyfile string, logger log.Logger) []opcua.Option {
-	opts := []opcua.Option{}
-	if keyfile != "" {
-		opts = append(opts, opcua.PrivateKeyFile(keyfile))
-	}
-	cert, err := ioutil.ReadFile(certfile)
-	if err != nil {
-		logger.Err("cannot read certfile : %v", err)
-	}
-	if certfile != "" {
-		opts = append(opts, opcua.Certificate(cert))
-	}
-	return opts
-}
-
-func clientSecurityOptions(cfg config.ServerConfig, logger log.Logger) ([]opcua.Option, error) {
-	savePolicy := *cfg.Policy
-	endpoints, err := opcua.GetEndpoints(*cfg.Endpoint)
-	if err != nil {
-		return nil, fmt.Errorf("%v", err)
-	}
-	authMode := ua.UserTokenTypeFromString(*cfg.Auth)
-	opts := []opcua.Option{}
-	var secPolicy string
+	var policy string
 	switch {
-	case *cfg.Policy == "auto":
-	case strings.HasPrefix(*cfg.Policy, ua.SecurityPolicyURIPrefix):
-		secPolicy = *cfg.Policy
-		*cfg.Policy = ""
-	case *cfg.Policy == "None" || *cfg.Policy == "Basic128Rsa15" || *cfg.Policy == "Basic256" || *cfg.Policy == "Basic256Sha256" || *cfg.Policy == "Aes128_Sha256_RsaOaep" || *cfg.Policy == "Aes256_Sha256_RsaPss":
-		secPolicy = ua.SecurityPolicyURIPrefix + *cfg.Policy
-		*cfg.Policy = ""
+	case c.SecPolicy == "auto":
+	case strings.HasPrefix(c.SecPolicy, ua.SecurityPolicyURIPrefix):
+		policy = c.SecPolicy
+	case c.SecPolicy == "None" ||
+		c.SecPolicy == "Basic128Rsa15" ||
+		c.SecPolicy == "Basic256" ||
+		c.SecPolicy == "Basic256Sha256" ||
+		c.SecPolicy == "Aes128_Sha256_RsaOaep" ||
+		c.SecPolicy == "Aes256_Sha256_RsaPss":
+		policy = ua.SecurityPolicyURIPrefix + c.SecPolicy
 	default:
-		return nil, fmt.Errorf("invalid security.Policy: %s", *cfg.Policy)
+		l.Fatal("invalid security policy: %s", c.SecPolicy)
 	}
 
-	var secMode ua.MessageSecurityMode
-	switch strings.ToLower(*cfg.Mode) {
+	var mode ua.MessageSecurityMode
+	switch strings.ToLower(c.SecMode) {
 	case "auto":
 	case "none":
-		secMode = ua.MessageSecurityModeNone
-		*cfg.Mode = ""
+		mode = ua.MessageSecurityModeNone
 	case "sign":
-		secMode = ua.MessageSecurityModeSign
-		*cfg.Mode = ""
+		mode = ua.MessageSecurityModeSign
 	case "signandencrypt":
-		secMode = ua.MessageSecurityModeSignAndEncrypt
-		*cfg.Mode = ""
+		mode = ua.MessageSecurityModeSignAndEncrypt
 	default:
-		return nil, fmt.Errorf("invalid security.Mode: %s", *cfg.Mode)
+		l.Fatal("invalid security mode: %s", c.SecMode)
 	}
 
-	// Allow input of only one of sec.Mode,sec.Policy when choosing 'None'
-	if secMode == ua.MessageSecurityModeNone || secPolicy == ua.SecurityPolicyURINone {
-		secMode = ua.MessageSecurityModeNone
-		secPolicy = ua.SecurityPolicyURINone
+	// Allow input of only one of security mode or security policy when choosing 'None'
+	if mode == ua.MessageSecurityModeNone || policy == ua.SecurityPolicyURINone {
+		mode = ua.MessageSecurityModeNone
+		policy = ua.SecurityPolicyURINone
 	}
 
 	// Find the best endpoint based on our input and server recommendation (highest SecurityMode+SecurityLevel)
-	var serverEndpoint *ua.EndpointDescription
+	var ep *ua.EndpointDescription
 	switch {
-	case *cfg.Mode == "auto" && *cfg.Policy == "auto": // No user selection, choose best
-		for _, e := range endpoints {
-			if serverEndpoint == nil || (e.SecurityMode >= serverEndpoint.SecurityMode && e.SecurityLevel >= serverEndpoint.SecurityLevel) {
-				serverEndpoint = e
+	case c.SecMode == "auto" && c.SecPolicy == "auto": // No user selection, choose best
+		for _, e := range ee {
+			if ep == nil || (e.SecurityMode >= ep.SecurityMode && e.SecurityLevel >= ep.SecurityLevel) {
+				ep = e
 			}
 		}
 
-	case *cfg.Mode != "auto" && *cfg.Policy == "auto": // User only cares about.Mode, select highest securitylevel with that.Mode
-		for _, e := range endpoints {
-			if e.SecurityMode == secMode && (serverEndpoint == nil || e.SecurityLevel >= serverEndpoint.SecurityLevel) {
-				serverEndpoint = e
+	case c.SecMode != "auto" && c.SecPolicy == "auto": // User only cares about.Mode, select highest securitylevel with that.Mode
+		for _, e := range ee {
+			if e.SecurityMode == mode && (ep == nil || e.SecurityLevel >= ep.SecurityLevel) {
+				ep = e
 			}
 		}
 
-	case *cfg.Mode == "auto" && *cfg.Policy != "auto": // User only cares about.Policy, select highest securitylevel with that.Policy
-		for _, e := range endpoints {
-			if e.SecurityPolicyURI == secPolicy && (serverEndpoint == nil || e.SecurityLevel >= serverEndpoint.SecurityLevel) {
-				serverEndpoint = e
+	case c.SecMode == "auto" && c.SecPolicy != "auto": // User only cares about.Policy, select highest securitylevel with that.Policy
+		for _, e := range ee {
+			if e.SecurityPolicyURI == policy && (ep == nil || e.SecurityLevel >= ep.SecurityLevel) {
+				ep = e
 			}
 		}
 
 	default: // User cares about both
-		for _, e := range endpoints {
-			if e.SecurityPolicyURI == secPolicy && e.SecurityMode == secMode && (serverEndpoint == nil || e.SecurityLevel >= serverEndpoint.SecurityLevel) {
-				serverEndpoint = e
+		for _, e := range ee {
+			if e.SecurityPolicyURI == policy && e.SecurityMode == mode && (ep == nil || e.SecurityLevel >= ep.SecurityLevel) {
+				ep = e
 			}
 		}
 	}
 
-	*cfg.Policy = savePolicy
-
-	if serverEndpoint == nil {
-		return nil, fmt.Errorf("unable to find suitable server.Endpoint with selected sec.Policy and sec.Mode")
+	if ep != nil {
+		// Make sure the selected endpoint supports the authentication mode
+		utt := ua.UserTokenTypeFromString(c.AuthMode)
+		for _, t := range ep.UserIdentityTokens {
+			if t.TokenType == utt {
+				return ep
+			}
+		}
 	}
 
-	if validateEndpointConfig(endpoints, serverEndpoint.SecurityPolicyURI, serverEndpoint.SecurityMode, authMode); err != nil {
-		return nil, fmt.Errorf("error validating input: %s", err)
-	}
-
-	opts = append(opts, opcua.SecurityFromEndpoint(serverEndpoint, authMode))
-	logger.Info("using config: Endpoint: %s, Security.Mode: %s, %s auth.Mode : %s", serverEndpoint.EndpointURL, serverEndpoint.SecurityPolicyURI, serverEndpoint.SecurityMode, authMode)
-	return opts, nil
+	l.Fatal("unable to find suitable server endpoint with selected security policy, security mode and authentication mode")
+	return nil
 }
 
-func validateEndpointConfig(endpoints []*ua.EndpointDescription, secPolicy string, secMode ua.MessageSecurityMode, authMode ua.UserTokenType) error {
-	for _, e := range endpoints {
-		if e.SecurityMode == secMode && e.SecurityPolicyURI == secPolicy {
-			for _, t := range e.UserIdentityTokens {
-				if t.TokenType == authMode {
-					return nil
-				}
+func connectionOptions() []opcua.Option {
+	return []opcua.Option{
+		opcua.Lifetime(10 * time.Minute),
+		opcua.RequestTimeout(5 * time.Second),
+		opcua.AutoReconnect(true),
+	}
+}
+
+func authenticationOptions(c config.ServerConfig, l log.Logger, e *ua.EndpointDescription, crt *tls.Certificate) []opcua.Option {
+	o := []opcua.Option{}
+	switch c.AuthMode {
+	case "Certificate":
+		o = append(o, opcua.AuthCertificate(crt.Certificate[0]))
+	case "UserName":
+		o = append(o, opcua.AuthUsername(c.Username, c.Password))
+	default:
+		l.Info("authentication mode not set, defaulting to anonymous")
+		o = append(o, opcua.AuthAnonymous())
+	}
+	o = append(o, opcua.SecurityFromEndpoint(e, ua.UserTokenTypeFromString(c.AuthMode)))
+	return o
+}
+
+func securityOptions(c config.ServerConfig, l log.Logger, e *ua.EndpointDescription, crt *tls.Certificate) []opcua.Option {
+	o := []opcua.Option{}
+	switch c.SecMode {
+	case "Sign", "SignAndEncrypt":
+		o = append(o,
+			opcua.PrivateKey(crt.PrivateKey.(*rsa.PrivateKey)),
+			opcua.Certificate(crt.Certificate[0]))
+	default:
+		l.Warn("No security mode is not recommended, consider using one")
+	}
+	return o
+}
+
+func loadCertificate(c config.ServerConfig, l log.Logger) tls.Certificate {
+	var crt tls.Certificate
+	if c.CertPath != "" && c.KeyPath != "" {
+		crt, err := tls.LoadX509KeyPair(c.CertPath, c.KeyPath)
+		if err != nil {
+			l.Fatal("failed to load certificate: %s", err)
+		} else {
+			_, ok := crt.PrivateKey.(*rsa.PrivateKey)
+			if !ok {
+				l.Fatal("invalid private key")
 			}
 		}
+		return crt
 	}
-	return errors.Errorf("server does not support an.Endpoint with security : %s , %s", secPolicy, secMode)
+	return crt
 }

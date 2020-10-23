@@ -15,14 +15,14 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Endpoint *string
-	CertFile *string
-	KeyFile  *string
-	Policy   *string
-	Mode     *string
-	Auth     *string
-	Username *string
-	Password *string
+	Endpoint  string
+	CertPath  string
+	KeyPath   string
+	SecPolicy string
+	SecMode   string
+	AuthMode  string
+	Username  string
+	Password  string
 }
 
 type MetricsConfig struct {
@@ -37,21 +37,21 @@ type Metric struct {
 	Type   string            `yaml:"type"`
 }
 
-func NewConfig(endpoint, certfile, keyfile, policy, mode, auth, username, password, filename *string) (*Config, error) {
+func NewConfig(endpoint, certPath, keyPath, secMode, secPolicy, authMode, username, password, configPath string) (*Config, error) {
 	c := &Config{
 		ServerConfig: &ServerConfig{
-			Endpoint: endpoint,
-			CertFile: certfile,
-			KeyFile:  keyfile,
-			Policy:   policy,
-			Mode:     mode,
-			Auth:     auth,
-			Username: username,
-			Password: password,
+			Endpoint:  endpoint,
+			CertPath:  certPath,
+			KeyPath:   keyPath,
+			SecMode:   secMode,
+			SecPolicy: secPolicy,
+			AuthMode:  authMode,
+			Username:  username,
+			Password:  password,
 		},
 		MetricsConfig: &MetricsConfig{},
 	}
-	if err := c.LoadMetricsConfig(*filename); err != nil {
+	if err := c.LoadMetricsConfig(configPath); err != nil {
 		return nil, err
 	}
 	return c, nil

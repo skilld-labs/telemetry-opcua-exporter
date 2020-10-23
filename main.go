@@ -12,10 +12,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gopcua/opcua/debug"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/common/version"
-	"github.com/skilld-labs/opcua/debug"
 	"github.com/skilld-labs/telemetry-opcua-exporter/collector"
 	"github.com/skilld-labs/telemetry-opcua-exporter/config"
 	"github.com/skilld-labs/telemetry-opcua-exporter/log"
@@ -45,7 +45,6 @@ var (
 	sc = &SafeConfig{
 		C: &config.Config{},
 	}
-	configFile                 *string
 	reloadCh                   chan chan error
 	registry                   *prometheus.Registry
 	prometheusGoCollector      = prometheus.NewGoCollector()
@@ -54,21 +53,21 @@ var (
 
 func init() {
 	registry = prometheus.NewRegistry()
-	registry.MustRegister(opcuaDuration, opcuaRequestErrors, version.NewCollector("opcua_exporter"), opcuaUnexpectedRequestType)
+	registry.MustRegister(opcuaDuration, opcuaRequestErrors, version.NewCollector("telemetry_opcua_exporter"), opcuaUnexpectedRequestType)
 	registry.MustRegister(prometheusGoCollector, prometheusProcessCollector)
 	reloadCh = make(chan chan error)
 }
 
 func main() {
-	bindAddress := flag.String("bindAddress", ":4242", "Address to listen on for web interface.")
-	configFile = flag.String("configFile", "opcua.yaml", "Path to configuration file.")
+	bindAddress := flag.String("bindAddress", ":4242", "Address to listen on for web interface")
+	configPath := flag.String("config", "opcua.yaml", "Path to configuration file")
 	endpoint := flag.String("endpoint", "", "OPC UA Endpoint URL")
-	certfile := flag.String("cert", "", "Path to certificate file")
-	keyfile := flag.String("key", "", "Path to PEM Private Key file")
-	policy := flag.String("sec-policy", "None", "Security Policy URL or one of None, Basic128Rsa15, Basic256, Basic256Sha256")
-	mode := flag.String("sec-mode", "auto", "Security Mode: one of None, Sign, SignAndEncrypt")
-	auth := flag.String("auth-mode", "Anonymous", "Authentication Mode: one of Anonymous, UserName, Certificate")
-	username := flag.String("user", "", "Username to use in auth-mode UserName")
+	certPath := flag.String("cert", "", "Path to certificate file")
+	keyPath := flag.String("key", "", "Path to PEM Private Key file")
+	secMode := flag.String("sec-mode", "auto", "Security Mode: one of None, Sign, SignAndEncrypt")
+	secPolicy := flag.String("sec-policy", "None", "Security Policy URL or one of None, Basic128Rsa15, Basic256, Basic256Sha256")
+	authMode := flag.String("auth-mode", "Anonymous", "Authentication Mode: one of Anonymous, UserName, Certificate")
+	username := flag.String("username", "", "Username to use in auth-mode UserName")
 	password := flag.String("password", "", "Password to use in auth-mode UserName")
 	verbosity := flag.String("verbosity", "", "Log verbosity (debug/info/warn/error/fatal)")
 
@@ -81,13 +80,13 @@ func main() {
 	logger.SetVerbosity(*verbosity)
 	logger.Info("starting telemetry-opcua-exporter")
 
-	c, err := config.NewConfig(endpoint, certfile, keyfile, policy, mode, auth, username, password, configFile)
+	c, err := config.NewConfig(*endpoint, *certPath, *keyPath, *secMode, *secPolicy, *authMode, *username, *password, *configPath)
 	if err != nil {
 		logger.Err("error parsing config file :%v", err)
 		os.Exit(1)
 	}
 	sc.SetConfig(c)
-	reloadConfigOnChannel(logger)
+	reloadConfigOnChannel(logger, *configPath)
 	reloadConfigOnSignal(logger)
 
 	metricsCollector, err := collector.NewCollector(&collector.CollectorConfig{Config: sc.GetConfig(), Logger: logger})
@@ -102,8 +101,8 @@ func main() {
 	http.HandleFunc("/metrics", metricsHandler(logger))
 	http.HandleFunc("/config", configHandler(sc, logger))
 
-	http.HandleFunc("/config/reload", reloadConfigHandler(logger, metricsCollector, *configFile, false))
-	http.HandleFunc("/config/update", reloadConfigHandler(logger, metricsCollector, *configFile, true))
+	http.HandleFunc("/config/reload", reloadConfigHandler(logger, metricsCollector, *configPath, false))
+	http.HandleFunc("/config/update", reloadConfigHandler(logger, metricsCollector, *configPath, true))
 
 	logger.Info("listening on address: %s", *bindAddress)
 	if err = http.ListenAndServe(*bindAddress, nil); err != nil {
@@ -139,7 +138,7 @@ func metricsHandler(logger log.Logger) func(w http.ResponseWriter, r *http.Reque
 	}
 }
 
-func reloadConfigHandler(logger log.Logger, metricsCollector *collector.Collector, configFile string, updateFromBody bool) func(w http.ResponseWriter, r *http.Request) {
+func reloadConfigHandler(logger log.Logger, metricsCollector *collector.Collector, configPath string, updateFromBody bool) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case "POST":
@@ -151,10 +150,10 @@ func reloadConfigHandler(logger log.Logger, metricsCollector *collector.Collecto
 					return
 				}
 				if len(body) != 0 {
-					config.WriteFile(configFile, body)
+					config.WriteFile(configPath, body)
 				}
 				r.Body.Close()
-				logger.Info("%s is rewrite", configFile)
+				logger.Info("%s is rewriten", configPath)
 			}
 
 			if err := sendReloadChannel(); err != nil {
@@ -200,9 +199,9 @@ func (sc *SafeConfig) SetConfig(c *config.Config) {
 	sc.Unlock()
 }
 
-func (sc *SafeConfig) reloadConfig(configFile string) error {
+func (sc *SafeConfig) reloadConfig(configPath string) error {
 	c := sc.GetConfig()
-	if err := c.LoadMetricsConfig(configFile); err != nil {
+	if err := c.LoadMetricsConfig(configPath); err != nil {
 		return err
 	}
 	sc.SetConfig(c)
@@ -230,12 +229,12 @@ func reloadConfigOnSignal(logger log.Logger) {
 	}()
 }
 
-func reloadConfigOnChannel(logger log.Logger) {
+func reloadConfigOnChannel(logger log.Logger, configPath string) {
 	go func() {
 		for {
 			select {
 			case rc := <-reloadCh:
-				if err := sc.reloadConfig(*configFile); err != nil {
+				if err := sc.reloadConfig(configPath); err != nil {
 					logger.Err("error reloading config: %v", err)
 					rc <- err
 				} else {

@@ -1,11 +1,12 @@
 package collector
 
 import (
+	"context"
 	"fmt"
 	"time"
 
-	"github.com/skilld-labs/opcua"
-	"github.com/skilld-labs/opcua/ua"
+	"github.com/gopcua/opcua"
+	"github.com/gopcua/opcua/ua"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/skilld-labs/telemetry-opcua-exporter/client"
 	"github.com/skilld-labs/telemetry-opcua-exporter/config"
@@ -38,6 +39,9 @@ type metric struct {
 func NewCollector(cfg *CollectorConfig) (*Collector, error) {
 	c := &Collector{Logger: cfg.Logger, ServerConfig: *cfg.Config.ServerConfig}
 	c.opcuaClient = client.NewClientFromServerConfig(*cfg.Config.ServerConfig, cfg.Logger)
+	if err := c.opcuaClient.Connect(context.Background()); err != nil {
+		c.Logger.Fatal("cannot connect opcua client %v", err)
+	}
 	c.ReloadMetrics(cfg.Config.MetricsConfig)
 	return c, nil
 }
