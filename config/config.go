@@ -82,9 +82,6 @@ func WriteFile(filename string, content []byte) error {
 }
 
 func (mm MetricsConfig) validate() error {
-	if len(mm.Metrics) == 0 {
-		return errors.New("missing field 'metrics' in top configuration")
-	}
 	for i, m := range mm.Metrics {
 		if m.Name == "" {
 			return errors.New("missing field 'name' in 'metrics' configuration of metric " + fmt.Sprint(i))

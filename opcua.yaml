@@ -1,13 +1,1 @@
-metrics:
-  - name: Temperature   # MANDATORY
-    help: get metrics for machine temperature # MANDATORY
-    nodeid: ns=2;i=10853 # MANDATORY and UNIQUE for each metric
-    labels: # if metrics share the same name they can be distinguis by labels
-      site: MLK
-    type: gauge # MANDATORY metric type can be counter, gauge, Float, Double
-  - name: Temperature
-    help: get metrics for machine temperature
-    nodeid: ns=2;i=10852
-    labels: 
-      site: Paris
-    type: gauge
+metrics: []
