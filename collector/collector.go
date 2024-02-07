@@ -183,6 +183,21 @@ func (c *Collector) getOpcuaValueFromIndex(opcuaResponse *ua.ReadResponse, idx i
 	if r.Status != ua.StatusOK {
 		return -1, fmt.Errorf("invalid status %v", r.Status)
 	}
+	
+	switch r.Value.Type() {
+	case ua.TypeIDInt16:
+		fallthrough
+	case ua.TypeIDInt32:
+		fallthrough
+	case ua.TypeIDInt64:
+		fallthrough
+	case ua.TypeIDUint16:
+		fallthrough
+	case ua.TypeIDUint32:
+		fallthrough
+	case ua.TypeIDUint64:
+		return float64(r.Value.Int()), nil
+	}
 	return r.Value.Float(), nil
 }
 
